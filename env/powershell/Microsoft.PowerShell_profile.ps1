@@ -10,6 +10,7 @@ $ALGO_ROOT = "$env:ALGO_HOME\boj_java"
 $BOJ_DIR   = Join-Path $ALGO_ROOT "boj"
 $LOG_DIR   = Join-Path $ALGO_ROOT "logs"
 $LOG_FILE  = Join-Path $LOG_DIR  "exec_log.csv"
+$GLOBAL:CURRENT_PHASE = "baseline"
 
 $TLE_LIMIT = 2000   # ms
 
@@ -19,7 +20,7 @@ if (!(Test-Path $LOG_DIR)) {
 }
 
 if (!(Test-Path $LOG_FILE)) {
-    "timestamp,problem,exec_ms,status" | Set-Content -Encoding UTF8 $LOG_FILE
+    "timestamp,problem,tc,exec_ms,status,phase" | Set-Content -Encoding UTF8 $LOG_FILE
 }
 
 # ---- 이동 ----
@@ -200,11 +201,150 @@ function jrunin {
             Write-Host "TC $($b.tc) => $ms ms" -ForegroundColor Cyan
         }
 
-        "$time,$problem,$($b.tc),$ms,$status" |
+        $phase = $GLOBAL:CURRENT_PHASE
+
+        "$time,$problem,$($b.tc),$ms,$status,$phase" |
             Add-Content -Encoding UTF8 $LOG_FILE
     }
 }
 
+function phase {
+    param([Parameter(Mandatory)][string]$name)
+    $GLOBAL:CURRENT_PHASE = $name
+    Write-Host "▶ CURRENT_PHASE = $name" -ForegroundColor Cyan
+}
+
 function prompt {
     "PS $pwd> "
+}
+
+function analyze {
+    param(
+        [string]$problem = $CURRENT_PROBLEM
+    )
+
+    if (-not $problem) {
+        Write-Host "❌ problem 번호 없음" -ForegroundColor Red
+        return
+    }
+
+    $problemDir = Join-Path $BOJ_DIR $problem
+    $readmePath = Join-Path $problemDir "README.md"
+
+    if (!(Test-Path $readmePath)) {
+        Write-Host "❌ README.md 없음" -ForegroundColor Red
+        return
+    }
+
+    $logs = Import-Csv $LOG_FILE | Where-Object {
+        $_.problem -eq $problem -and $_.status -eq "OK"
+    }
+
+    if ($logs.Count -eq 0) {
+        Write-Host "❌ 분석할 로그 없음" -ForegroundColor Red
+        return
+    }
+
+    # ---------- 통계 ----------
+    function Calc-Stats($rows) {
+        $times = $rows.exec_ms | ForEach-Object { [int]$_ } | Sort-Object
+        $n = $times.Count
+        if ($n -eq 0) { return $null }
+
+        $avg = ($times | Measure-Object -Average).Average
+        $std = [math]::Sqrt(
+            ($times | ForEach-Object { ($_ - $avg) * ($_ - $avg) } |
+             Measure-Object -Sum).Sum / $n
+        )
+
+        return @{
+            Count  = $n
+            Avg    = [math]::Round($avg, 2)
+            Min    = $times[0]
+            Max    = $times[-1]
+            StdDev = [math]::Round($std, 2)
+            CV     = [math]::Round(($std / $avg) * 100, 2)
+        }
+    }
+
+    # ---------- phase × tc ----------
+    $rows = @()
+    foreach ($g in ($logs | Group-Object phase, tc)) {
+        $phase, $tc = $g.Name -split ",\s*"
+        $stat = Calc-Stats $g.Group
+        if ($stat) {
+            $rows += [pscustomobject]@{
+                Phase  = $phase
+                TC     = $tc
+                Avg    = $stat.Avg
+                Min    = $stat.Min
+                Max    = $stat.Max
+                StdDev = $stat.StdDev
+                CV     = $stat.CV
+                Count  = $stat.Count
+            }
+        }
+    }
+
+    # ---------- phase 순서 정렬 ----------
+    $phaseOrder = $rows.Phase | Select-Object -Unique
+    $ordered = @()
+
+    foreach ($tc in ($rows.TC | Select-Object -Unique)) {
+        $prevAvg = $null
+
+        foreach ($phase in $phaseOrder) {
+            $r = $rows | Where-Object { $_.TC -eq $tc -and $_.Phase -eq $phase }
+            if ($r) {
+                $delta = if ($prevAvg) {
+                    [math]::Round((($prevAvg - $r.Avg) / $prevAvg) * 100, 2)
+                } else {
+                    "-"
+                }
+
+                $ordered += [pscustomobject]@{
+                    Phase  = $phase
+                    TC     = $tc
+                    Avg    = $r.Avg
+                    Min    = $r.Min
+                    Max    = $r.Max
+                    StdDev = $r.StdDev
+                    CV     = $r.CV
+                    Delta  = $delta
+                    Count  = $r.Count
+                }
+
+                $prevAvg = $r.Avg
+            }
+        }
+    }
+
+    # ---------- 콘솔 출력 ----------
+    Write-Host "`n==== Performance Analysis (Problem $problem) ====" -ForegroundColor Yellow
+    $ordered | Format-Table Phase, TC, Avg, Delta, StdDev, CV, Count -AutoSize
+
+    # ---------- README Markdown (라인 깨짐 방지) ----------
+    $md = @"
+
+## ⏱ 실행 시간 성능 분석 (자동 생성)
+
+> phase × 테스트케이스(tc) 기준 자동 분석
+
+| Phase | TC | Avg(ms) | Δ% | StdDev | CV(%) | N |
+|:----:|:--:|-------:|---:|-------:|------:|--:|
+
+"@
+
+    foreach ($r in $ordered) {
+        $md += "| $($r.Phase) | $($r.TC) | $($r.Avg) | $($r.Delta) | $($r.StdDev) | $($r.CV) | $($r.Count) |`n"
+    }
+
+    # 기존 분석 섹션 제거 후 재작성
+    (Get-Content $readmePath -Raw) `
+        -replace "(?s)## ⏱ 실행 시간 성능 분석.*", "" |
+        Set-Content -Encoding UTF8 $readmePath
+
+    Add-Content -Encoding UTF8 $readmePath "`n$md"
+
+    Write-Host "`n✔ phase 간 개선율 분석 완료 및 README 업데이트" -ForegroundColor Green
 }
