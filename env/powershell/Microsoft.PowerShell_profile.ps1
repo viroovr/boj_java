@@ -12,7 +12,7 @@ $LOG_DIR   = Join-Path $ALGO_ROOT "logs"
 $LOG_FILE  = Join-Path $LOG_DIR  "exec_log.csv"
 $GLOBAL:CURRENT_PHASE = "baseline"
 
-$TLE_LIMIT = 2000   # ms
+Add-Type -Path "$ALGO_ROOT/tools/anglesharp/AngleSharp.dll"
 
 # ---- Ensure dirs ----
 if (!(Test-Path $LOG_DIR)) {
@@ -28,6 +28,65 @@ function algo {
     Set-Location $ALGO_ROOT
 }
 
+function Get-BojLimits {
+    param([Parameter(Mandatory)][string]$ProblemId)
+
+    $url = "https://www.acmicpc.net/problem/$ProblemId"
+
+    $html = Invoke-WebRequest `
+        -Uri $url `
+        -Headers @{
+            "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36"
+            "Accept" = "text/html"
+            "Accept-Language" = "ko-KR,ko;q=0.9"
+            "Referer" = "https://www.acmicpc.net/"
+        } `
+        -TimeoutSec 10 `
+        -UseBasicParsing |
+        Select-Object -ExpandProperty Content
+
+    if (-not $html) {
+        throw "HTML fetch failed"
+    }
+
+    $parser = [AngleSharp.Html.Parser.HtmlParser]::new()
+    $doc = $parser.ParseDocument([string]$html)
+
+    $table = $doc.QuerySelector("#problem-info")
+    if (-not $table) {
+        throw "problem-info table not found"
+    }
+
+    $headers = $table.QuerySelectorAll("thead th")
+    $values  = $table.QuerySelectorAll("tbody td")
+
+    $timeMs = 2000
+    $memMb  = 512
+
+    for ($i = 0; $i -lt $headers.Length; $i++) {
+        $h = $headers[$i].TextContent.Trim()
+        $v = $values[$i].TextContent.Trim()
+
+        switch ($h) {
+            "시간 제한" {
+                $timeMs = [int](([double]($v -replace '[^0-9.]','')) * 1000)
+            }
+            "메모리 제한" {
+                $memMb = [int]($v -replace '[^0-9]','')
+            }
+        }
+    }
+
+    return @{
+        time_limit_ms   = $timeMs
+        memory_limit_mb = $memMb
+        source          = "boj"
+        fetched_at      = (Get-Date).ToString("o")
+    }
+}
+
+
+
 function boj {
     param(
         [Parameter(Mandatory)]
@@ -37,6 +96,7 @@ function boj {
     $problemDir = Join-Path $BOJ_DIR $number
     $filePath  = Join-Path $problemDir "Main.java"
     $readmePath = Join-Path $problemDir "README.md"
+    $limitPath = Join-Path $problemDir "limits.json"
 
     if (!(Test-Path $problemDir)) {
         New-Item -ItemType Directory -Path $problemDir | Out-Null
@@ -91,6 +151,13 @@ public class Main {
 "@ | Set-Content -Encoding UTF8 $readmePath
     }
 
+    # ✅ limits.json은 없을 때만 생성
+    if (!(Test-Path $limitPath)) {
+        Write-Host "▶ Fetching BOJ limits for problem $number..." -ForegroundColor Yellow
+        $limits = Get-BojLimits $number
+        $limits | ConvertTo-Json | Set-Content -Encoding UTF8 $limitPath
+    }
+
     Set-Location $problemDir
     code $filePath
 
@@ -107,7 +174,8 @@ function Invoke-Java {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "java"
-    $psi.Arguments = (($JavaArgs + @("Main")) -join " ")
+    $psi.Arguments = (($JavaArgs + @("-cp", ".", "Main")) -join " ")
+    $psi.WorkingDirectory = (Get-Location).Path   # ⭐ 핵심
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput  = $true
     $psi.RedirectStandardOutput = $true
@@ -206,6 +274,9 @@ function jrunin {
         [string]$tc
     )
 
+    $limit = Get-Content "limits.json" | ConvertFrom-Json
+    $TLE_LIMIT = $limit.time_limit_ms
+
     if (!(Test-Path "input.txt")) {
         Write-Host "❌ input.txt 없음" -ForegroundColor Red
         return
@@ -214,6 +285,12 @@ function jrunin {
     javac Main.java
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ 컴파일 실패" -ForegroundColor Red
+        return
+    }
+
+    if (!(Test-Path "Main.class")) {
+        Write-Host "❌ Main.class 생성 안됨" -ForegroundColor Red
+        Get-ChildItem -Recurse -Filter "*.class"
         return
     }
 
@@ -439,6 +516,9 @@ function jstress {
         [string[]]$JavaArgs = @()   # 필요하면 "-Xms256m","-Xmx256m","-XX:+UseSerialGC" 등
     )
 
+    $limit = Get-Content "limits.json" | ConvertFrom-Json
+    $TLE_LIMIT = $limit.time_limit_ms
+
     if (-not $problem) {
         Write-Host "❌ problem 번호 없음" -ForegroundColor Red
         return
@@ -501,7 +581,9 @@ function jstress {
             }
 
             $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            "$time,$problem,$($b.tc),$($r.ms),OK,$GLOBAL:CURRENT_PHASE,$tag" |
+            $status = if ($ms -gt $TLE_LIMIT) { "TLE" } else { "OK" }
+
+            "$time,$problem,$($b.tc),$($r.ms),$status,$GLOBAL:CURRENT_PHASE,$tag" |
                 Add-Content -Encoding UTF8 $LOG_FILE
         }
 
