@@ -1,55 +1,28 @@
 import java.io.*;
-import java.util.*;
 
 public class Main {
     public static void main(String[] args) throws Exception {
         BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
 
-        char[] sticks = br.readLine().toCharArray();
-        Stack<String> st = new Stack<>();
+        String sticks = br.readLine();
         
         int result = 0;
-        
-        for (char c : sticks) {
-            String element = String.valueOf(c);
-            if (c == ')') {
-                if (st.peek().equals("(")) {
-                    st.pop();
-                    if (!st.empty()) {
-                        try {
-                            int count = Integer.parseInt(st.peek());
-                            st.pop();
-                            element = String.valueOf(count + 1);
-                        } catch (NumberFormatException ex) {
-                            element = "2";
-                        }
-                    } else {
-                        continue;
-                    }
+        int open = 0;
+
+        for (int i = 0; i < sticks.length() ; i++) {
+            char ch = sticks.charAt(i);
+
+            if (ch == ')') {
+                open--;
+                if (sticks.charAt( i - 1) == '(') {
+                    result += open;
                 }
                 else {
-                    try {
-                        int count = Integer.parseInt(st.peek());
-                        st.pop();
-                        st.pop();
-                        if (!st.empty()) {
-                            try {
-                                int count2 = Integer.parseInt(st.peek());
-                                st.pop();
-                                element = String.valueOf(count + count2 - 1);
-                            } catch (NumberFormatException ex) {
-                                element = String.valueOf(count);
-                            }
-                            result += count;
-                        } else {
-                            result += count;
-                            continue;
-                        }
-                    } catch (NumberFormatException ex) {
-                    }
+                    result += 1;
                 }
+            } else {
+                open++;
             }
-            st.add(element);
         }
 
         System.out.print(result);
