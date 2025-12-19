@@ -35,6 +35,7 @@ function boj {
 
     $problemDir = Join-Path $BOJ_DIR $number
     $filePath  = Join-Path $problemDir "Main.java"
+    $readmePath = Join-Path $problemDir "README.md"
 
     if (!(Test-Path $problemDir)) {
         New-Item -ItemType Directory -Path $problemDir | Out-Null
@@ -56,6 +57,37 @@ public class Main {
     }
 }
 "@ | Set-Content -Encoding UTF8 $filePath
+    }
+
+    # README.md 생성 (이미 있으면 유지)
+    if (!(Test-Path $readmePath)) {
+@"
+# BOJ $number
+
+## 1. 문제 개요
+
+- 문제 요약 작성
+
+## 2. 초기 접근 방식
+
+- 최초 풀이 아이디어
+
+## 3. 문제점
+
+- 복잡도, 설계 한계
+
+## 4. 개선된 접근
+
+- 핵심 아이디어 정리
+
+## 5. 개선 효과
+
+- 시간/공간 복잡도 비교
+
+## 6. 회고
+
+- 배운 점
+"@ | Set-Content -Encoding UTF8 $readmePath
     }
 
     Set-Location $problemDir
@@ -143,7 +175,9 @@ function jrunin {
         $b.lines | Set-Content -Encoding UTF8 $tmp
 
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        & java Main < $tmp
+
+        Get-Content $tmp | & java Main
+
         [Console]::Out.WriteLine()
         $exitCode = $LASTEXITCODE
         $sw.Stop()
