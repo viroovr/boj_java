@@ -86,7 +86,6 @@ function Get-BojLimits {
 }
 
 
-
 function boj {
     param(
         [Parameter(Mandatory)]
@@ -162,6 +161,18 @@ public class Main {
     code $filePath
 
     Set-Variable -Name CURRENT_PROBLEM -Value $number -Scope Global
+}
+
+function Get-JavaMemoryArgs {
+    param($limit)
+
+    $heapMb = [int]($limit.memory_limit_mb * 0.75)
+
+    return @(
+        "-Xms$heapMb" + "m"
+        "-Xmx$heapMb" + "m"
+        "-XX:MaxMetaspaceSize=128m"
+    )
 }
 
 # ---- Java runner (정확한 측정용) ----
@@ -255,6 +266,22 @@ function Get-TcBlocks {
     return $blocks
 }
 
+function Get-RunStatus {
+    param($res, $limit)
+
+    if ($res.ExitCode -ne 0) {
+        if ($res.Stderr -match "OutOfMemoryError|Java heap space|GC overhead") {
+            return "MLE"
+        }
+        return "RUNTIME_ERROR"
+    }
+
+    if ($res.Ms -gt $limit.time_limit_ms) {
+        return "TLE"
+    }
+
+    return "OK"
+}
 
 # ---- 실행 ----
 function jrun {
@@ -275,7 +302,7 @@ function jrunin {
     )
 
     $limit = Get-Content "limits.json" | ConvertFrom-Json
-    $TLE_LIMIT = $limit.time_limit_ms
+    $memArgs = Get-JavaMemoryArgs $limit
 
     if (!(Test-Path "input.txt")) {
         Write-Host "❌ input.txt 없음" -ForegroundColor Red
@@ -308,8 +335,13 @@ function jrunin {
         }
     }
 
+
     foreach ($b in $blocks) {
-        $res = Invoke-Java -InputLines $b.lines
+        
+        $res = Invoke-Java `
+            -InputLines $b.lines `
+            -JavaArgs $memArgs `
+            -NoOutput
 
         [Console]::Out.WriteLine()
 
@@ -321,13 +353,24 @@ function jrunin {
         $ms   = $res.Ms
         $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         $phase = $GLOBAL:CURRENT_PHASE
+        $status = Get-RunStatus $res $limit
 
-        if ($ms -gt $TLE_LIMIT) {
-            $status = "TLE_WARN"
-            Write-Host "TC $($b.tc) => $ms ms (LIMIT $TLE_LIMIT)" -ForegroundColor Red
-        } else {
-            $status = "OK"
-            Write-Host "TC $($b.tc) => $ms ms" -ForegroundColor Cyan
+        switch ($status) {
+            "OK" {
+                Write-Host "TC $($b.tc) => $ms ms" -ForegroundColor Cyan
+            }
+            "TLE" {
+                Write-Host "TC $($b.tc) => $ms ms (TLE: $($limit.time_limit_ms))" -ForegroundColor Red
+            }
+            "MLE" {
+                Write-Host "TC $($b.tc) => MLE" -ForegroundColor Magenta
+            }
+            "RUNTIME_ERROR" {
+                Write-Host "TC $($b.tc) => RUNTIME ERROR" -ForegroundColor DarkRed
+            }
+            default {
+                Write-Host "TC $($b.tc) => UNKNOWN ($status)" -ForegroundColor Yellow
+            }
         }
 
         # ✅ CSV 컬럼 7개 고정 (tag 비어도 넣어야 Import-Csv가 안 흔들림)
@@ -518,6 +561,7 @@ function jstress {
 
     $limit = Get-Content "limits.json" | ConvertFrom-Json
     $TLE_LIMIT = $limit.time_limit_ms
+    $memArgs = Get-JavaMemoryArgs $limit
 
     if (-not $problem) {
         Write-Host "❌ problem 번호 없음" -ForegroundColor Red
@@ -581,7 +625,7 @@ function jstress {
             }
 
             $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            $status = if ($ms -gt $TLE_LIMIT) { "TLE" } else { "OK" }
+            $status = Get-RunStatus $res $limit
 
             "$time,$problem,$($b.tc),$($r.ms),$status,$GLOBAL:CURRENT_PHASE,$tag" |
                 Add-Content -Encoding UTF8 $LOG_FILE
