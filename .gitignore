@@ -28,3 +28,4 @@ logs/*.csv
 input.txt
 .vscode/
 .idea/
+limits.json
