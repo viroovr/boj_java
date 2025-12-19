@@ -78,48 +78,97 @@ function jrun {
 
 function jrunin {
     param(
-        [string]$file = "Main.java",
-        [string]$problem = $CURRENT_PROBLEM
+        [string]$problem = $CURRENT_PROBLEM,
+        [string]$tc      # 선택 실행 (옵션)
     )
 
-    # 1️⃣ 컴파일
-    javac $file
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ 컴파일 실패" -ForegroundColor Red
-        return
-    }
-
-    # 2️⃣ 입력 파일 체크
     if (!(Test-Path "input.txt")) {
         Write-Host "❌ input.txt 없음" -ForegroundColor Red
         return
     }
 
-    # 3️⃣ 실행 + 시간 측정
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    cmd /c "java Main < input.txt"
-    $exitCode = $LASTEXITCODE
-    $sw.Stop()
-
-    # 4️⃣ 실행 실패 시 → 기록 안 함
-    if ($exitCode -ne 0) {
-        Write-Host "❌ 실행 실패 (exit code: $exitCode)" -ForegroundColor Red
+    # 컴파일
+    javac Main.java
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ 컴파일 실패" -ForegroundColor Red
         return
     }
 
-    # 5️⃣ 정상 실행만 기록
-    $ms   = $sw.ElapsedMilliseconds
-    $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    # input.txt 파싱
+    $content = Get-Content "input.txt"
 
-    if ($ms -gt $TLE_LIMIT) {
-        $status = "TLE_WARN"
-        Write-Host "`n[EXEC TIME] $ms ms (LIMIT $TLE_LIMIT ms)" -ForegroundColor Red
-    } else {
-        $status = "OK"
-        Write-Host "`n[EXEC TIME] $ms ms" -ForegroundColor Cyan
+    $blocks = @()
+    $current = @()
+    $currentTc = $null
+
+    foreach ($line in $content) {
+        if ($line -match '^#\s*tc\s*=\s*(.+)$') {
+            if ($currentTc -ne $null) {
+                $blocks += [pscustomobject]@{
+                    tc    = $currentTc
+                    lines = $current
+                }
+            }
+            $currentTc = $matches[1].Trim()
+            $current = @()
+            continue
+        }
+        $current += $line
     }
 
-    "$time,$problem,$ms,$status" | Add-Content -Encoding UTF8 $LOG_FILE
+    if ($currentTc -ne $null) {
+        $blocks += [pscustomobject]@{
+            tc    = $currentTc
+            lines = $current
+        }
+    }
+
+    if ($blocks.Count -eq 0) {
+        Write-Host "❌ tc 블록을 찾지 못함" -ForegroundColor Red
+        return
+    }
+
+    # tc 선택 필터
+    if ($tc) {
+        $blocks = $blocks | Where-Object { $_.tc -eq $tc }
+        if ($blocks.Count -eq 0) {
+            Write-Host "❌ tc=$tc 없음" -ForegroundColor Red
+            return
+        }
+    }
+
+    # 실행
+    foreach ($b in $blocks) {
+        $tmp = New-TemporaryFile
+        $b.lines | Set-Content -Encoding UTF8 $tmp
+
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        & java Main < $tmp
+        [Console]::Out.WriteLine()
+        $exitCode = $LASTEXITCODE
+        $sw.Stop()
+
+        Remove-Item $tmp
+
+        if ($exitCode -ne 0) {
+            Write-Host "❌ TC $($b.tc) 실행 실패" -ForegroundColor Red
+            continue
+        }
+
+        $ms = $sw.ElapsedMilliseconds
+        $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+        if ($ms -gt $TLE_LIMIT) {
+            $status = "TLE_WARN"
+            Write-Host "TC $($b.tc) => $ms ms (LIMIT $TLE_LIMIT)" -ForegroundColor Red
+        } else {
+            $status = "OK"
+            Write-Host "TC $($b.tc) => $ms ms" -ForegroundColor Cyan
+        }
+
+        "$time,$problem,$($b.tc),$ms,$status" |
+            Add-Content -Encoding UTF8 $LOG_FILE
+    }
 }
 
 function prompt {
