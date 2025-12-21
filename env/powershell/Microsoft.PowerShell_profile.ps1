@@ -126,9 +126,16 @@ function boj {
     $filePath  = Join-Path $problemDir "Main.java"
     $readmePath = Join-Path $problemDir "README.md"
     $limitPath = Join-Path $problemDir "limits.json"
+    $inputPath = Join-Path $problemDir "input.txt"
 
     if (!(Test-Path $problemDir)) {
         New-Item -ItemType Directory -Path $problemDir | Out-Null
+    }
+
+    if (!(Test-Path $inputPath)) {
+@"
+# tc=1
+"@ | Set-Content -Encoding UTF8 $inputPath
     }
 
     if (!(Test-Path $filePath)) {
@@ -402,8 +409,8 @@ function jrunin {
         
         $res = Invoke-Java `
             -InputLines $b.lines `
+            -Limit $limit `
             -JavaArgs $memArgs
-            -Limit $limit
 
         [Console]::Out.WriteLine()
 
@@ -475,7 +482,7 @@ function jstress {
     }
 
     $blocks = Get-TcBlocks "input.txt"
-    $failCount = 0
+    
     Write-Host "▶ Stress Test (runs=$runs, warmup=$warmup, phase=$GLOBAL:CURRENT_PHASE)" -ForegroundColor Yellow
 
     foreach ($b in $blocks) {
@@ -491,8 +498,8 @@ function jstress {
 
             $res = Invoke-Java `
                 -InputLines $b.lines `
-                -JavaArgs $memArgs `
                 -Limit $limit `
+                -JavaArgs $memArgs `
                 -NoOutput
 
             if ($res.ExitCode -ne 0) { 
@@ -1224,3 +1231,44 @@ function logclean {
     Write-Host "🗂 backup created: $backup" -ForegroundColor DarkGray
 }
 
+function bojclean {
+    param(
+        [string]$number = $GLOBAL:CURRENT_PROBLEM,
+        [switch]$ForceLimit
+    )
+
+    if (-not $number) {
+        Write-Host "❌ problem number not specified" -ForegroundColor Red
+        return
+    }
+
+    $problemDir = Join-Path $BOJ_DIR $number
+
+    if (!(Test-Path $problemDir)) {
+        Write-Host "❌ problem directory not found: $problemDir" -ForegroundColor Red
+        return
+    }
+
+    Write-Host "🧹 Cleaning BOJ $number workspace..." -ForegroundColor Cyan
+
+    # input.txt
+    $inputPath = Join-Path $problemDir "input.txt"
+    if (Test-Path $inputPath) {
+        Remove-Item $inputPath -Force
+        Write-Host " - input.txt removed"
+    }
+
+    # class files
+    Get-ChildItem $problemDir -Recurse -Filter "*.class" -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+    Write-Host " - *.class removed"
+
+    # limits.json (옵션)
+    $limitPath = Join-Path $problemDir "limits.json"
+    if ($ForceLimit -and (Test-Path $limitPath)) {
+        Remove-Item $limitPath -Force
+        Write-Host " - limits.json removed"
+    }
+
+    Write-Host "✅ Clean complete"
+}
