@@ -24,7 +24,7 @@ hs_err_pid*
 replay_pid*
 
 *.class
-logs/*.csv
+logs/*
 input.txt
 .vscode/
 .idea/
