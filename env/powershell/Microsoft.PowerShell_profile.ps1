@@ -85,6 +85,36 @@ function Get-BojLimits {
     }
 }
 
+function Update-BojReadmeMeta {
+    param([string]$problem)
+
+    $problemDir = Join-Path $BOJ_DIR $problem
+    $readmePath = Join-Path $problemDir "README.md"
+    $limitPath  = Join-Path $problemDir "limits.json"
+
+    if (!(Test-Path $readmePath) -or !(Test-Path $limitPath)) {
+        return
+    }
+
+    $limits = Get-Content $limitPath | ConvertFrom-Json
+
+    $meta = @"
+## 🧾 문제 정보
+
+- 🔗 문제 링크: https://www.acmicpc.net/problem/$problem
+- ⏱ 시간 제한: $($limits.time_limit_ms) ms
+- 💾 메모리 제한: $($limits.memory_limit_mb) MB
+
+---
+"@
+
+    $content = Get-Content $readmePath -Raw
+    $content = $content -replace "(?s)## 🧾 문제 정보.*?---\s*", ""
+    $content = $content -replace "(?s)^# BOJ.*?\n", "`$0`n$meta`n"
+
+    Set-Content -Encoding UTF8 $readmePath $content
+}
+
 
 function boj {
     param(
@@ -161,12 +191,13 @@ public class Main {
     code $filePath
 
     Set-Variable -Name CURRENT_PROBLEM -Value $number -Scope Global
+    Update-BojReadmeMeta $number
 }
 
 function Get-JavaMemoryArgs {
     param($limit)
 
-    $heapMb = [int]($limit.memory_limit_mb * 0.75)
+    $heapMb = [Math]::Max(128, [int]($limit.memory_limit_mb * 0.75))
 
     return @(
         "-Xms$heapMb" + "m"
@@ -179,13 +210,20 @@ function Get-JavaMemoryArgs {
 function Invoke-Java {
     param(
         [Parameter(Mandatory)][string[]]$InputLines,
+        [Parameter(Mandatory)]$Limit,
         [string[]]$JavaArgs = @(),
         [switch]$NoOutput
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "java"
-    $psi.Arguments = (($JavaArgs + @("-cp", ".", "Main")) -join " ")
+
+    $psi.ArgumentList.Clear()
+    foreach ($a in $JavaArgs) { $psi.ArgumentList.Add($a) }
+    $psi.ArgumentList.Add("-cp")
+    $psi.ArgumentList.Add(".")
+    $psi.ArgumentList.Add("Main")
+
     $psi.WorkingDirectory = (Get-Location).Path   # ⭐ 핵심
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput  = $true
@@ -205,12 +243,21 @@ function Invoke-Java {
     $p.StandardInput.Close()
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $timeoutMs = $Limit.time_limit_ms + 500
+
+    if (-not $p.WaitForExit($timeoutMs)) {
+        $p.Kill()
+        return [pscustomobject]@{
+            ExitCode = -1
+            Ms = $timeoutMs
+            Stdout = ""
+            Stderr = "TIMEOUT"
+        }
+    }
+    $sw.Stop()
 
     $out = $p.StandardOutput.ReadToEnd()
     $err = $p.StandardError.ReadToEnd()
-    $p.WaitForExit()
-
-    $sw.Stop()
 
     if (-not $NoOutput) {
         if ($out) { [Console]::Out.Write($out) }
@@ -223,6 +270,12 @@ function Invoke-Java {
         Stdout   = $out
         Stderr   = $err
     }
+}
+
+function phase {
+    param([Parameter(Mandatory)][string]$name)
+    $GLOBAL:CURRENT_PHASE = $name
+    Write-Host "▶ CURRENT_PHASE = $name" -ForegroundColor Cyan
 }
 
 # ---- input.txt parser cache ----
@@ -247,9 +300,9 @@ function Get-TcBlocks {
     $currentTc = $null
 
     foreach ($line in $content) {
-        if ($line -match '^\s*#\s*tc\s*=\s*(.+)\s*$') {
+        if ($line -match '^\s*#\s*tc\s*=\s*(\d+)\s*$') {
             if ($currentTc -ne $null) {
-                $blocks += [pscustomobject]@{ tc = $currentTc; lines = $current.ToArray() }
+                $blocks += [pscustomobject]@{ tc = [int]$currentTc; lines = $current.ToArray() }
             }
             $currentTc = $matches[1].Trim()
             $current = New-Object System.Collections.Generic.List[string]
@@ -259,7 +312,10 @@ function Get-TcBlocks {
     }
 
     if ($currentTc -ne $null) {
-        $blocks += [pscustomobject]@{ tc = $currentTc; lines = $current.ToArray() }
+        $blocks += [pscustomobject]@{ 
+            tc = [int]$currentTc; 
+            lines = $current.ToArray() 
+        }
     }
 
     $GLOBAL:__TC_CACHE = [pscustomobject]@{ Stamp = $stamp; Blocks = $blocks }
@@ -268,6 +324,8 @@ function Get-TcBlocks {
 
 function Get-RunStatus {
     param($res, $limit)
+
+    if ($res.Stderr -eq "TIMEOUT") { return "TLE" }
 
     if ($res.ExitCode -ne 0) {
         if ($res.Stderr -match "OutOfMemoryError|Java heap space|GC overhead") {
@@ -335,13 +393,17 @@ function jrunin {
         }
     }
 
+    if (-not $GLOBAL:CURRENT_PHASE) {
+        Write-Host "❌ CURRENT_PHASE 미설정" -ForegroundColor Red
+        return
+    }
 
     foreach ($b in $blocks) {
         
         $res = Invoke-Java `
             -InputLines $b.lines `
-            -JavaArgs $memArgs `
-            -NoOutput
+            -JavaArgs $memArgs
+            -Limit $limit
 
         [Console]::Out.WriteLine()
 
@@ -353,6 +415,7 @@ function jrunin {
         $ms   = $res.Ms
         $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         $phase = $GLOBAL:CURRENT_PHASE
+        
         $status = Get-RunStatus $res $limit
 
         switch ($status) {
@@ -379,11 +442,123 @@ function jrunin {
 }
 
 
-function phase {
-    param([Parameter(Mandatory)][string]$name)
-    $GLOBAL:CURRENT_PHASE = $name
-    Write-Host "▶ CURRENT_PHASE = $name" -ForegroundColor Cyan
+function jstress {
+    param(
+        [int]$runs = 100,
+        [int]$warmup = 10,
+        [string]$problem = $CURRENT_PROBLEM,
+        [string[]]$JavaArgs = @()   # 필요하면 "-Xms256m","-Xmx256m","-XX:+UseSerialGC" 등
+    )
+
+    $limit = Get-Content "limits.json" | ConvertFrom-Json
+    $memArgs = Get-JavaMemoryArgs $limit
+
+    if (-not $problem) {
+        Write-Host "❌ problem 번호 없음" -ForegroundColor Red
+        return
+    }
+
+    if (!(Test-Path "input.txt")) {
+        Write-Host "❌ input.txt 없음" -ForegroundColor Red
+        return
+    }
+
+    javac Main.java
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ 컴파일 실패" -ForegroundColor Red
+        return
+    }
+
+    if (-not $GLOBAL:CURRENT_PHASE) {
+        Write-Host "❌ CURRENT_PHASE 미설정" -ForegroundColor Red
+        return
+    }
+
+    $blocks = Get-TcBlocks "input.txt"
+    $failCount = 0
+    Write-Host "▶ Stress Test (runs=$runs, warmup=$warmup, phase=$GLOBAL:CURRENT_PHASE)" -ForegroundColor Yellow
+
+    foreach ($b in $blocks) {
+        Write-Host "`n[TC $($b.tc)]" -ForegroundColor Cyan
+
+        $records = New-Object System.Collections.Generic.List[object]
+
+        # warmup 시작 전
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+
+        for ($i = 1; $i -le ($runs + $warmup); $i++) {
+
+            $res = Invoke-Java `
+                -InputLines $b.lines `
+                -JavaArgs $memArgs `
+                -Limit $limit `
+                -NoOutput
+
+            if ($res.ExitCode -ne 0) { 
+                $status = Get-RunStatus $res $limit
+
+                $records.Add([pscustomobject]@{
+                    ms = $res.Ms
+                    idx = $i
+                    status = $status
+                })
+                continue 
+            }
+
+            $records.Add([pscustomobject]@{ 
+                ms = $res.Ms
+                idx = $i
+                status = Get-RunStatus $res $limit
+            })
+        }
+
+        if ($records.Count -lt ($warmup + 10)) {
+            Write-Host "❌ 실행 샘플이 너무 적음 (records=$($records.Count))" -ForegroundColor Red
+            continue
+        }
+
+        # ---- 트림 기준은 'sample 구간'에 대해서만 적용하는 게 맞음 ----
+        $onlySample = $records | Where-Object { $_.idx -gt $warmup } | Sort-Object ms
+        $n = $onlySample.Count
+
+        $sampleIdxOrder = $onlySample | ForEach-Object { $_.idx }
+        $lowCut  = [int]([Math]::Floor($n * 0.05))
+        $highCut = $n - $lowCut
+        
+        if ($n -lt 20) {
+            $lowCut = 0
+            $highCut = $n
+        }
+
+        $posMap = @{}
+        for ($i = 0; $i -lt $sampleIdxOrder.Count; $i++) {
+            $posMap[$sampleIdxOrder[$i]] = $i
+        }
+
+        foreach ($r in $records) {
+            $tag = if ($r.idx -le $warmup) { "warmup" } else { "sample" }
+
+            # sample만 trim 태그 부여
+            if ($tag -eq "sample") {
+                
+                $pos = $posMap[$r.idx]
+                if ($pos -ge 0 -and $pos -lt $lowCut) { $tag = "trim_low" }
+                elseif ($pos -ge $highCut)            { $tag = "trim_high" }
+            }
+
+            $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+            "$time,$problem,$($b.tc),$($r.ms),$($r.status),$GLOBAL:CURRENT_PHASE,$tag" |
+                Add-Content -Encoding UTF8 $LOG_FILE
+        }
+
+        Write-Host "TC=$($b.tc) | samples=$runs | trim=5% | heap=$($memArgs -join ' ')" -ForegroundColor DarkGray
+
+    }
+    Write-Host "`n✔ Stress Test Complete" -ForegroundColor Green
 }
+
 
 function prompt {
     "PS $pwd> "
@@ -429,13 +604,28 @@ function analyze {
         return
     }
 
-    $logs = Get-Logs | Where-Object {
+    $allLogs = Get-Logs | Where-Object {
         $_.problem -eq $problem -and $_.status -eq "OK"
+    }
+
+    $logs = Get-Logs | Where-Object {
+        $_.problem -eq $problem `
+        -and $_.status -eq "OK" `
+        -and $_.phase `
+        -and $_.tc `
+        -and $_.tag -eq "sample"
     }
 
     if ($logs.Count -eq 0) {
         Write-Host "❌ 분석할 로그 없음" -ForegroundColor Red
         return
+    }
+
+    # 제외 로그 수 계산
+
+    $excluded = $allLogs.Count - $logs.Count
+    if ($excluded -gt 0) {
+        Write-Host "⚠ sample 외 로그 $excluded 건 분석 제외" -ForegroundColor DarkYellow
     }
 
     # ---------- 통계 ----------
@@ -551,94 +741,27 @@ function analyze {
     Write-Host "`n✔ phase 간 개선율 분석 완료 및 README 업데이트" -ForegroundColor Green
 }
 
-function jstress {
+function Measure-TDist-CDF {
     param(
-        [int]$runs = 100,
-        [int]$warmup = 10,
-        [string]$problem = $CURRENT_PROBLEM,
-        [string[]]$JavaArgs = @()   # 필요하면 "-Xms256m","-Xmx256m","-XX:+UseSerialGC" 등
+        [double]$t,
+        [double]$df
     )
 
-    $limit = Get-Content "limits.json" | ConvertFrom-Json
-    $TLE_LIMIT = $limit.time_limit_ms
-    $memArgs = Get-JavaMemoryArgs $limit
-
-    if (-not $problem) {
-        Write-Host "❌ problem 번호 없음" -ForegroundColor Red
-        return
+    # df가 충분히 크면 정규 근사
+    if ($df -gt 100) {
+        return Measure-Normal-CDF $t
     }
 
-    if (!(Test-Path "input.txt")) {
-        Write-Host "❌ input.txt 없음" -ForegroundColor Red
-        return
-    }
+    # Cornish–Fisher 보정
+    $g1 = ($t * $t * $t + $t) / (4 * $df)
+    $g2 = (5 * $t * $t * $t * $t * $t + 16 * $t * $t * $t + 3 * $t) / (96 * $df * $df)
 
-    javac Main.java
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ 컴파일 실패" -ForegroundColor Red
-        return
-    }
-
-    $blocks = Get-TcBlocks "input.txt"
-
-    Write-Host "▶ Stress Test (runs=$runs, warmup=$warmup, phase=$GLOBAL:CURRENT_PHASE)" -ForegroundColor Yellow
-
-    foreach ($b in $blocks) {
-        Write-Host "`n[TC $($b.tc)]" -ForegroundColor Cyan
-
-        $records = New-Object System.Collections.Generic.List[object]
-
-        for ($i = 1; $i -le ($runs + $warmup); $i++) {
-            if ($i -le $warmup) {
-                [System.GC]::Collect()
-                [System.GC]::WaitForPendingFinalizers()
-            }
-
-            $res = Invoke-Java -InputLines $b.lines -JavaArgs $JavaArgs -NoOutput
-
-            if ($res.ExitCode -ne 0) { continue }
-
-            $records.Add([pscustomobject]@{ ms = $res.Ms; idx = $i })
-        }
-
-        if ($records.Count -lt ($warmup + 10)) {
-            Write-Host "❌ 실행 샘플이 너무 적음 (records=$($records.Count))" -ForegroundColor Red
-            continue
-        }
-
-        # ---- 트림 기준은 'sample 구간'에 대해서만 적용하는 게 맞음 ----
-        $onlySample = $records | Where-Object { $_.idx -gt $warmup } | Sort-Object ms
-        $n = $onlySample.Count
-
-        $sampleIdxOrder = $onlySample | ForEach-Object { $_.idx }
-        $lowCut  = [int]([Math]::Floor($n * 0.05))
-        $highCut = $n - $lowCut
-
-        foreach ($r in $records) {
-            $tag = if ($r.idx -le $warmup) { "warmup" } else { "sample" }
-
-            # sample만 trim 태그 부여
-            if ($tag -eq "sample") {
-                $pos = [array]::IndexOf($sampleIdxOrder, $r.idx)
-                if ($pos -ge 0 -and $pos -lt $lowCut) { $tag = "trim_low" }
-                elseif ($pos -ge $highCut)            { $tag = "trim_high" }
-            }
-
-            $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            $status = Get-RunStatus $res $limit
-
-            "$time,$problem,$($b.tc),$($r.ms),$status,$GLOBAL:CURRENT_PHASE,$tag" |
-                Add-Content -Encoding UTF8 $LOG_FILE
-        }
-
-        Write-Host "✔ TC $($b.tc) logged (runs=$runs, warmup=$warmup)" -ForegroundColor Green
-    }
-
-    Write-Host "`n✔ Stress Test Complete" -ForegroundColor Green
+    $z = $t + $g1 + $g2
+    return Measure-Normal-CDF $z
 }
 
 # ---- Normal CDF (Abramowitz–Stegun approximation) ----
-function Normal-CDF($z) {
+function Measure-Normal-CDF($z) {
     $z = [double]$z
     $t = 1.0 / (1.0 + 0.2316419 * [Math]::Abs($z))
     $d = 0.3989423 * [Math]::Exp(-$z * $z / 2.0)
@@ -665,7 +788,7 @@ function Normal-CDF($z) {
 }
 
 # ---- Effect Size (Cohen's d, Welch) ----
-function Cohen-D($x1, $x2) {
+function Measure-Cohen-D($x1, $x2) {
     $n1 = $x1.Count
     $n2 = $x2.Count
 
@@ -752,7 +875,15 @@ function ttest {
 
     foreach ($tc in ($logs.tc | Select-Object -Unique)) {
         $tcRows = $logs | Where-Object { $_.tc -eq $tc }
-        $phases = $tcRows.phase | Select-Object -Unique
+        $phases = $tcRows |
+            Group-Object phase |
+            ForEach-Object {
+                $firstTs = ($_.Group.timestamp | ForEach-Object { [datetime]$_ } |
+                            Measure-Object -Minimum).Minimum
+                [pscustomobject]@{ Phase = $_.Name; Ts = $firstTs }
+            } |
+            Sort-Object Ts |
+            Select-Object -ExpandProperty Phase
 
         for ($i = 0; $i -lt $phases.Count - 1; $i++) {
             $p1 = $phases[$i]
@@ -780,11 +911,11 @@ function ttest {
                 [Math]::Pow(($v2 / $x2.Count), 2) / ($x2.Count - 1)
             )
 
-            $pval = 2 * (1 - (Normal-CDF([Math]::Abs($t))))
+            $pval = 2 * (1 - (Measure-TDist-CDF ([Math]::Abs($t)) $df))
             $pval = [Math]::Round($pval, 5)
             $sig = if ($pval -lt $alpha) { "YES" } else { "NO" }
             
-            $d = Cohen-D $x1 $x2
+            $d = Measure-Cohen-D $x1 $x2
             $effect = Effect-Label $d
 
             Write-Host "TC $tc : $p1 → $p2 | t=$([Math]::Round($t,3)) p=$([Math]::Round($pval,5)) d=$d ($effect) Significant=$sig"
@@ -795,6 +926,8 @@ function ttest {
                 T = [Math]::Round($t, 3)
                 P = [Math]::Round($pval, 5)
                 D = $d
+                N1 = $x1.Count
+                N2 = $x2.Count
                 Effect = $effect
                 Sig = $sig
             }
@@ -809,14 +942,22 @@ function ttest {
 - 유의수준 α = $alpha
 - 대상 데이터: tag=sample (warmup / trim 제외)
 - 검정 방식: 독립 2표본 Welch t-test
+- p-value 계산:
+  - df > 100 : 정규분포 근사
+  - df ≤ 100 : Cornish–Fisher 보정된 t-분포 근사
+- Cohen’s d 기준
+  - |d| < 0.2 : NEGLIGIBLE
+  - 0.2–0.5   : SMALL
+  - 0.5–0.8   : MEDIUM
+  - ≥ 0.8     : LARGE
 
-| TC | Phase 비교 | t-value | p-value | Cohen’s d | Effect | Significant |
-|:--:|:-----------|--------:|--------:|----------:|:------:|:-----------:|
+| TC | Phase 비교 | n1 | n2 | t-value | p-value | Cohen’s d | Effect | Significant |
+|:--:|:-----------|------:|------:|--------:|--------:|----------:|:------:|:-----------:|
 
 "@
 
     foreach ($r in $results) {
-        $md += "| $($r.TC) | $($r.Phase) | $($r.T) | $($r.P) | $($r.D) | $($r.Effect) | $($r.Sig) |`n"
+        $md += "| $($r.TC) | $($r.Phase) | $($r.N1) | $($r.N2) |$($r.T) | $($r.P) | $($r.D) | $($r.Effect) | $($r.Sig) |`n"
     }
 
     # 기존 섹션 제거 후 재작성
@@ -842,6 +983,7 @@ function regress {
     $problemDir = Join-Path $BOJ_DIR $problem
     $readmePath = Join-Path $problemDir "README.md"
     $summaries = @()
+    $EFFECT_THRESHOLD = 0.3  # SMALL 이상
 
     if (!(Test-Path $readmePath)) {
         Write-Host "❌ README.md 없음" -ForegroundColor Red
@@ -860,7 +1002,7 @@ function regress {
     }
 
     Write-Host "`n==== Regression Check (Problem $problem) ====" -ForegroundColor Yellow
-    Write-Host "(p-value: normal approximation, df ignored)" -ForegroundColor DarkGray
+    Write-Host "(Welch t-test with df-adjusted p-value)" -ForegroundColor DarkGray
     Write-Host "Rule: Δ% < 0 AND p < $alpha (Welch t-test, two-tailed)" -ForegroundColor DarkGray
 
     $regressions = @()
@@ -897,15 +1039,23 @@ function regress {
 
             # Welch t-stat (df는 회귀 판정에 필수는 아니니 생략 가능, p는 정규근사)
             $t = ($m1 - $m2) / [Math]::Sqrt(($v1 / $x1.Count) + ($v2 / $x2.Count))
-            $pval = 2 * (1 - (Normal-CDF([Math]::Abs($t))))
+
+            $df = (
+                [Math]::Pow(($v1 / $x1.Count + $v2 / $x2.Count), 2)
+            ) / (
+                [Math]::Pow(($v1 / $x1.Count), 2) / ($x1.Count - 1) +
+                [Math]::Pow(($v2 / $x2.Count), 2) / ($x2.Count - 1)
+            )
+
+            $pval = 2 * (1 - (Measure-TDist-CDF ([Math]::Abs($t)) $df))
             $pval = [Math]::Round($pval, 5)
             $tR = [math]::Round($t, 3)
 
-            $d = Cohen-D $x1 $x2
+            $d = Measure-Cohen-D $x1 $x2
             $isRegression = (
                 $delta -lt 0 -and
                 $pval -lt $alpha -and
-                [Math]::Abs($d) -ge 0.3
+                [Math]::Abs($d) -ge $EFFECT_THRESHOLD
             )
 
             $effect = Effect-Label $d
@@ -920,7 +1070,17 @@ function regress {
             }
             if ($isRegression) {
                 Write-Host "🚨 REGRESSION: TC $tc | $p1 → $p2 | Δ=$delta% t=$tR p=$pval d=$d ($effect)" -ForegroundColor Red
-                $regressions += [pscustomobject]@{ TC=$tc; Phase="$p1 → $p2"; Delta=$delta; T=$tR; P=$pval; D=$d; Effect=$effect}
+                $regressions += [pscustomobject]@{ 
+                    TC=$tc; 
+                    Phase="$p1 → $p2"; 
+                    Delta=$delta; 
+                    T=$tR; 
+                    P=$pval; 
+                    D=$d; 
+                    Effect=$effect
+                    N1 = $x1.Count
+                    N2 = $x2.Count
+                }
             } else {
                 Write-Host "OK : TC $tc | $p1 → $p2 | Δ=$delta% t=$tR p=$pval d=$d ($effect)" -ForegroundColor DarkGray
             }
@@ -959,19 +1119,24 @@ function regress {
 
 - 기준: **Δ% < 0 AND p < $alpha**
 - 해석: 평균 실행 시간이 증가했고(Δ% 음수), 그 악화가 통계적으로 유의미함
-- p-value는 정규근사 기반이며, df 보정은 생략됨
+- p-value는 Welch t-test 기준으로 계산되며,
+  df ≤ 100 구간에서는 Cornish–Fisher 보정된 t-분포 근사를 사용함
 - p-value는 “우연이 아닐 가능성”
 - Cohen’s d는 “개선 규모”
 - **p < 0.05 && d ≥ 0.3 → 실질적 영향 가능성**
 - **p < 0.05 && d < 0.2 → 통계적이지만 의미 없음**
+- 회귀 판정 기준:
+  - 평균 실행 시간 증가 (Δ% < 0)
+  - 통계적 유의성 (p < α)
+  - 효과 크기: |d| ≥ 0.3 (SMALL 이상)
 
-| TC | Phase | Δ% | t-value | p-value | Cohen’s d | Effect |
-|:--:|:------|---:|--------:|--------:|----------:|:------:|
+| TC | Phase | n1 | n2 | Δ% | t-value | p-value | Cohen’s d | Effect |
+|:--:|:------|---:|---:|---:|--------:|--------:|----------:|:------:|
 
 "@
 
     foreach ($r in $regressions) {
-        $md += "| $($r.TC) | $($r.Phase) | $($r.Delta) | $($r.T) | $($r.P) | $($r.D) | $($r.Effect) |`n"
+        $md += "| $($r.TC) | $($r.Phase) | $($r.N1) |$($r.N2) |$($r.Delta) | $($r.T) | $($r.P) | $($r.D) | $($r.Effect) |`n"
     }
 
     $content = Get-Content $readmePath -Raw
@@ -1010,30 +1175,40 @@ function logclean {
         return
     }
 
+    if ($keepPerProblem -le 0) {
+        Write-Host "❌ keepPerProblem은 1 이상이어야 합니다." -ForegroundColor Red
+        return
+    }
+
+
     $now = Get-Date
     $cutoff = $now.AddDays(-$days)
 
-    $logs = Get-Logs
+    # timestamp 파싱 가능한 로그만
+    $logs = Get-Logs | Where-Object { $_.timestamp -as [datetime] }
 
-    # 1️⃣ 기간 기준 필터
-    $recentLogs = $logs | Where-Object {
-        [datetime]$_.timestamp -ge $cutoff
-    }
-
-    # 2️⃣ 문제별 최신 K개 유지
-    $finalLogs = @()
-
-    foreach ($problem in ($recentLogs.problem | Select-Object -Unique)) {
-        $subset = $recentLogs |
+    # 1️⃣ 문제별 최신 K개 유지
+    $latestPerProblem = @()
+    foreach ($problem in ($logs.problem | Select-Object -Unique)) {
+        $subset = $logs |
             Where-Object { $_.problem -eq $problem } |
             Sort-Object { [datetime]$_.timestamp } -Descending |
             Select-Object -First $keepPerProblem
 
-        $finalLogs += $subset
+        $latestPerProblem += $subset
     }
+
+    # 2️⃣ 기간 기준 필터
+    $finalLogs = $latestPerProblem | Where-Object {
+        [datetime]$_.timestamp -ge $cutoff
+    }
+
 
     # 3️⃣ timestamp 기준 재정렬
     $finalLogs = $finalLogs | Sort-Object { [datetime]$_.timestamp }
+
+    $backup = "$LOG_FILE.bak_$(Get-Date -Format yyyyMMddHHmmss)"
+    Copy-Item $LOG_FILE $backup
 
     # 4️⃣ 덮어쓰기
     "timestamp,problem,tc,exec_ms,status,phase,tag" |
@@ -1043,6 +1218,9 @@ function logclean {
         "$($_.timestamp),$($_.problem),$($_.tc),$($_.exec_ms),$($_.status),$($_.phase),$($_.tag)"
     } | Add-Content -Encoding UTF8 $LOG_FILE
 
+    $removed = $logs.Count - $finalLogs.Count
+    Write-Host "🧹 removed $removed logs" -ForegroundColor DarkGray
     Write-Host "✔ 로그 정리 완료 (최근 $days일, 문제별 $keepPerProblem개 유지)" -ForegroundColor Green
+    Write-Host "🗂 backup created: $backup" -ForegroundColor DarkGray
 }
 
