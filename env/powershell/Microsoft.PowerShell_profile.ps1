@@ -350,7 +350,7 @@ function Get-RunStatus {
 
 # ---- 실행 ----
 function jrun {
-    javac Main.java
+    javac --release 8 -Xlint:-options Main.java
     if ($LASTEXITCODE -ne 0) { return }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -374,7 +374,7 @@ function jrunin {
         return
     }
 
-    javac Main.java
+    javac --release 8 -Xlint:-options Main.java
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ 컴파일 실패" -ForegroundColor Red
         return
@@ -470,7 +470,7 @@ function jstress {
         return
     }
 
-    javac Main.java
+    javac --release 8 -Xlint:-options Main.java
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ 컴파일 실패" -ForegroundColor Red
         return
